@@ -11,7 +11,7 @@ import { SnapBar } from "./components/SnapBar";
 import { FeedPreview } from "./components/FeedPreview";
 import { WorldviewBrainMap } from "./components/WorldviewBrainMap";
 import { BrainMapInspector } from "./components/BrainMapInspector";
-import { runDemoScenario } from "./demo/demoScenario";
+import { loadDemoSeed } from "./demo/demoScenario";
 import { useSnapMindStore } from "./state/useSnapMindStore";
 
 const queryClient = new QueryClient();
@@ -39,7 +39,7 @@ function Home() {
       
       {agentProfile?.formationStage === "empty" && (
         <button 
-          onClick={runDemoScenario}
+          onClick={loadDemoSeed}
           className="absolute top-4 right-4 z-10 text-xs px-3 py-1.5 rounded-full bg-primary/20 text-primary border border-primary/30 hover:bg-primary hover:text-primary-foreground transition-colors"
         >
           데모 데이터 추가

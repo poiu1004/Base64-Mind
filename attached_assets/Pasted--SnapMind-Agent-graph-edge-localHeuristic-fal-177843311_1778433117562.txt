@@ -1,0 +1,73 @@
+현재 SnapMind 구현을 보니 가장 큰 문제는 이미지가 Agent 재료로 변환되지 않고, graph edge도 충분히 생성되지 않으며, 대화가 localHeuristic fallback 수준에 머무는 것이다.
+
+아래 문제를 실제 코드 기준으로 고쳐줘.
+
+1. Image Understanding Pipeline 추가
+현재 extractors.ts는 이미지 blob을 실제로 분석하지 않고 fileName만 본다.
+그래서 업로드된 이미지가 Agent의 판단 재료가 되지 않는다.
+
+이미지 RawItem 처리 시 다음 구조의 ImageUnderstanding을 생성해줘:
+- caption
+- visibleText
+- objects
+- aesthetics
+- mood
+- colors
+- composition
+- keywords
+- inferredUserInterest
+
+기본 구현은 API 없이 돌아가는 fallback을 두되,
+실제 품질을 위해 apiAdapter 또는 OpenAI vision-compatible adapter를 선택적으로 붙일 수 있게 설계해줘.
+중요: 이미지 파일명만 보고 판단하는 구조는 실패로 본다.
+
+2. Signal/Card 구조 수정
+이미지에서 추출한 caption, aesthetics, keywords, mood, colors를 MultimodalSignal로 만들고,
+이 신호들이 JudgmentCard로 변환되게 해줘.
+
+카드 description은 “Derived from keyword” 같은 개발자 문구가 아니라,
+Agent가 판단에 쓸 수 있는 자연어 요약이어야 한다.
+
+예:
+- "차가운 블루톤의 홀로그래픽 인터페이스에 반복적으로 끌림"
+- "점과 선으로 연결된 지식 구조, 뉴런/별자리형 시각화에 관심"
+
+3. Graph edge 생성 로직 수정
+현재 graphBuilder는 두 노드가 같은 JudgmentCard를 공유해야 edge를 만든다.
+하지만 카드 하나가 노드 하나로 바뀌는 구조라 edge가 거의 생기지 않는다.
+
+edge 생성 기준을 아래로 바꿔줘:
+- 같은 RawItem에서 함께 나온 keyword/aesthetic/mood는 co_occurrence edge 생성
+- 여러 RawItem에서 반복적으로 함께 등장하면 strength 증가
+- 의미적으로 유사한 signal은 semantic similarity 또는 heuristic similarity로 연결
+- feedback으로 weakened/removed 된 edge는 다시 강하게 살아나지 않게 처리
+
+즉, RawItem 하나에서 image understanding이 8개 신호를 만들면,
+그 신호들 사이에 최소한 몇 개의 synapse edge가 생겨야 한다.
+
+4. localHeuristicAdapter 개선
+현재 대화가 너무 generic하다.
+사용자가 “내가 좋아하는 게 뭐야?”, “내 취향이 뭐 같아?”, “내가 저장한 것들로 봤을 때 뭐에 끌리는 것 같아?”라고 물으면,
+top JudgmentCard, GraphNode, GraphEdge를 기반으로 구체적으로 답해야 한다.
+
+규칙:
+- fallback 문장 “더 쌓이면 선명해질 거야”를 쉽게 쓰지 마.
+- 데이터가 적어도 추정 가능한 범위에서 조심스럽게 답해.
+- source ID, confidence score, 분석 리포트는 노출하지 마.
+- 하지만 자연스럽게 “네가 저장해둔 것들에서 반복되는 결”처럼 말해도 된다.
+
+예:
+“지금까지 보면 너는 단순한 이미지보다, 점과 선이 연결되면서 어떤 내부 구조가 드러나는 장면에 끌리는 것 같아. 특히 차가운 블루톤, 홀로그래픽 레이어, 뇌/별자리처럼 관계가 보이는 시각화가 반복돼.”
+
+5. 검증 시나리오 추가
+아래가 통과해야 한다:
+- 일반 이미지 파일명 `IMG_1234.png`를 올려도 caption/keywords/aesthetics가 생성된다.
+- 이미지 업로드 후 GraphNode가 3개 이상 생긴다.
+- 같은 이미지에서 나온 keyword들 사이에 GraphEdge가 생긴다.
+- “내가 좋아하는 게 뭐야?”라고 물으면 fallback이 아니라 저장물 기반 답변이 나온다.
+- edge를 weaken/remove 한 뒤 같은 질문을 하면 답변 방향이 달라진다.
+
+중요:
+이건 UI 문제가 아니라 Agent 형성 파이프라인 문제다.
+이미지가 RawItem으로 저장되는 것에서 끝나면 실패다.
+이미지는 반드시 Signal -> JudgmentCard -> GraphNode/GraphEdge -> AgentProfile -> Talk로 이어져야 한다.
