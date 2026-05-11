@@ -17,23 +17,20 @@ export async function processRawItem(itemId: string): Promise<void> {
       blob = await blobRepo.getById(item.blobId);
     }
 
-    // Extract signals — async now (image canvas analysis)
+    // Extract signals — API primary, canvas/heuristic fallback
     const signals = await extractSignals(item, blob);
 
-    // Persist signals so they can be re-queried later
+    // Batch persist signals
     const existingSignals = await signalRepo.getByItemId(itemId);
-    if (existingSignals.length === 0) {
-      for (const sig of signals) {
-        await signalRepo.create(sig);
-      }
+    if (existingSignals.length === 0 && signals.length > 0) {
+      await Promise.all(signals.map(sig => signalRepo.create(sig)));
     }
 
     // Build / merge cards
     const existingCards = await cardRepo.getAll();
     const updatedCards = buildCards(signals, existingCards);
-    for (const card of updatedCards) {
-      await cardRepo.upsert(card);
-    }
+    // Batch upsert cards
+    await Promise.all(updatedCards.map(card => cardRepo.upsert(card)));
 
     // Build / merge graph
     const existingNodes = await nodeRepo.getAll();
@@ -42,12 +39,11 @@ export async function processRawItem(itemId: string): Promise<void> {
 
     const { nodes, edges } = buildGraph(allCards, existingNodes, existingEdges);
 
-    for (const node of nodes) {
-      await nodeRepo.upsert(node);
-    }
-    for (const edge of edges) {
-      await edgeRepo.upsert(edge);
-    }
+    // Batch upsert nodes and edges
+    await Promise.all([
+      ...nodes.map(node => nodeRepo.upsert(node)),
+      ...edges.map(edge => edgeRepo.upsert(edge)),
+    ]);
 
     // Recompute profile
     const items = await rawItemRepo.getAll();

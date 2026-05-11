@@ -13,7 +13,7 @@ export interface AgentAdapter {
   ): Promise<string>;
 }
 
+// API-assisted is primary. localHeuristicAdapter is fallback only.
 export function getAdapter(): AgentAdapter {
-  // Use local heuristic for MVP to avoid needing API keys
-  return localHeuristicAdapter;
+  return apiAdapter;
 }

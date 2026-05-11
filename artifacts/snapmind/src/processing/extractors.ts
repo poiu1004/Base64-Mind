@@ -3,7 +3,154 @@ import type { RawItem, MultimodalSignal } from '../domain/types';
 import { DEMO_SEED_SIGNALS } from '../demo/seedItems';
 
 // ---------------------------------------------------------------------------
-// Image Understanding — canvas-based local analysis (no API key needed)
+// VisionApiResult — matches /api/understand/vision response
+// ---------------------------------------------------------------------------
+
+export type VisionApiResult = {
+  caption?: string;
+  visibleText?: string[];
+  objects?: string[];
+  scene?: string;
+  style?: string[];
+  aesthetics?: string[];
+  mood?: string[];
+  colors?: string[];
+  composition?: string[];
+  keywords?: string[];
+  inferredUserInterest?: string[];
+  possibleUseCases?: string[];
+};
+
+export type TextApiResult = {
+  topics?: string[];
+  keywords?: string[];
+  mood?: string[];
+  inferredUserInterest?: string[];
+  possibleUseCases?: string[];
+  summary?: string;
+};
+
+// ---------------------------------------------------------------------------
+// API proxy calls (server-side — no key in frontend)
+// ---------------------------------------------------------------------------
+
+async function callVisionApi(blob: Blob, mimeType?: string): Promise<VisionApiResult | null> {
+  try {
+    const base64 = await blobToBase64(blob);
+    const res = await fetch('/api/understand/vision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64: base64, mimeType: mimeType ?? blob.type ?? 'image/jpeg' }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { success: boolean; result?: VisionApiResult };
+    return data.success ? (data.result ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function callTextApi(text: string): Promise<TextApiResult | null> {
+  try {
+    const res = await fetch('/api/understand/text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { success: boolean; result?: TextApiResult };
+    return data.success ? (data.result ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.split(',')[1] ?? result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Vision API result → MultimodalSignals
+// ---------------------------------------------------------------------------
+
+function visionResultToSignals(
+  result: VisionApiResult,
+  itemId: string,
+  now: string,
+  existing: MultimodalSignal[]
+): MultimodalSignal[] {
+  const signals: MultimodalSignal[] = [];
+  const seen = new Set(existing.map(s => `${s.kind}:${s.value}`));
+
+  const add = (kind: MultimodalSignal['kind'], value: string, confidence: number) => {
+    const v = (value ?? '').trim();
+    if (!v) return;
+    const key = `${kind}:${v}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    signals.push({ id: uuidv4(), itemId, kind, value: v, confidence, createdAt: now });
+  };
+
+  if (result.caption) add('visual_caption', result.caption, 0.92);
+
+  for (const t of result.visibleText ?? []) add('ocr_text', t, 0.90);
+
+  for (const obj of result.objects ?? []) add('keyword', obj, 0.85);
+  if (result.scene) add('keyword', result.scene, 0.87);
+  for (const kw of result.keywords ?? []) add('keyword', kw, 0.83);
+
+  for (const s of result.style ?? []) add('aesthetic', s, 0.82);
+  for (const a of result.aesthetics ?? []) add('aesthetic', a, 0.82);
+  for (const m of result.mood ?? []) add('aesthetic', m, 0.78);
+  for (const c of result.colors ?? []) add('aesthetic', c, 0.70);
+  for (const comp of result.composition ?? []) add('metadata', `composition:${comp}`, 0.65);
+
+  for (const int of result.inferredUserInterest ?? []) add('intent', int, 0.88);
+  for (const use of result.possibleUseCases ?? []) add('intent', use, 0.75);
+
+  return signals;
+}
+
+function textResultToSignals(
+  result: TextApiResult,
+  itemId: string,
+  now: string,
+  existing: MultimodalSignal[]
+): MultimodalSignal[] {
+  const signals: MultimodalSignal[] = [];
+  const seen = new Set(existing.map(s => `${s.kind}:${s.value}`));
+
+  const add = (kind: MultimodalSignal['kind'], value: string, confidence: number) => {
+    const v = (value ?? '').trim();
+    if (!v) return;
+    const key = `${kind}:${v}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    signals.push({ id: uuidv4(), itemId, kind, value: v, confidence, createdAt: now });
+  };
+
+  if (result.summary) add('visual_caption', result.summary, 0.90);
+  for (const t of result.topics ?? []) add('keyword', t, 0.85);
+  for (const kw of result.keywords ?? []) add('keyword', kw, 0.82);
+  for (const m of result.mood ?? []) add('aesthetic', m, 0.75);
+  for (const int of result.inferredUserInterest ?? []) add('intent', int, 0.88);
+  for (const use of result.possibleUseCases ?? []) add('intent', use, 0.75);
+
+  return signals;
+}
+
+// ---------------------------------------------------------------------------
+// Canvas-based local image analysis (fallback)
 // ---------------------------------------------------------------------------
 
 export type ImageUnderstanding = {
@@ -34,7 +181,7 @@ function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   return [h * 360, s, l];
 }
 
-async function analyzeImageBlob(blob: Blob): Promise<ImageUnderstanding> {
+async function analyzeImageBlobLocally(blob: Blob): Promise<ImageUnderstanding> {
   const SIZE = 80;
   return new Promise((resolve) => {
     const img = new Image();
@@ -42,17 +189,15 @@ async function analyzeImageBlob(blob: Blob): Promise<ImageUnderstanding> {
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = SIZE;
-        canvas.height = SIZE;
+        canvas.width = SIZE; canvas.height = SIZE;
         const ctx = canvas.getContext('2d');
-        if (!ctx) { resolve(fallbackUnderstanding()); URL.revokeObjectURL(url); return; }
+        if (!ctx) { resolve(localFallback()); URL.revokeObjectURL(url); return; }
         ctx.drawImage(img, 0, 0, SIZE, SIZE);
         const { data } = ctx.getImageData(0, 0, SIZE, SIZE);
         URL.revokeObjectURL(url);
 
-        // Accumulate HSL values
         let totalH = 0, totalS = 0, totalL = 0;
-        const hBuckets = new Array(12).fill(0); // 30° buckets
+        const hBuckets = new Array(12).fill(0);
         let darkPixels = 0, lightPixels = 0, saturatedPixels = 0;
         const pixelCount = SIZE * SIZE;
 
@@ -65,135 +210,64 @@ async function analyzeImageBlob(blob: Blob): Promise<ImageUnderstanding> {
           if (s > 0.5) saturatedPixels++;
         }
 
-        const avgL = totalL / pixelCount;
         const avgS = totalS / pixelCount;
         const darkRatio = darkPixels / pixelCount;
         const lightRatio = lightPixels / pixelCount;
         const saturatedRatio = saturatedPixels / pixelCount;
-
-        // Find dominant hue bucket
         const dominantBucket = hBuckets.indexOf(Math.max(...hBuckets));
 
-        // Map hue bucket to color descriptor
-        const hueDescriptors: string[] = [
-          'red', 'orange-red', 'amber', 'yellow-green',
-          'green', 'teal', 'cyan', 'blue', 'indigo', 'violet', 'purple', 'magenta'
-        ];
+        const hueDescriptors = ['red','orange-red','amber','yellow-green','green','teal','cyan','blue','indigo','violet','purple','magenta'];
         const dominantHueName = hueDescriptors[dominantBucket];
+        const brightness: 'dark'|'medium'|'light' = darkRatio > 0.5 ? 'dark' : lightRatio > 0.5 ? 'light' : 'medium';
+        const saturation: 'muted'|'balanced'|'vibrant' = avgS < 0.2 ? 'muted' : avgS > 0.55 ? 'vibrant' : 'balanced';
 
-        // Brightness category
-        const brightness: 'dark' | 'medium' | 'light' =
-          darkRatio > 0.5 ? 'dark' : lightRatio > 0.5 ? 'light' : 'medium';
-
-        // Saturation category
-        const saturation: 'muted' | 'balanced' | 'vibrant' =
-          avgS < 0.2 ? 'muted' : avgS > 0.55 ? 'vibrant' : 'balanced';
-
-        // Aesthetic signals from color characteristics
         const aesthetics: string[] = [];
         const keywords: string[] = [];
         const colors: string[] = [];
 
-        // Blue / cyan / indigo range (buckets 7-9)
         if (dominantBucket >= 6 && dominantBucket <= 9) {
           colors.push('deep blue');
-          if (saturation === 'vibrant') {
-            aesthetics.push('holographic');
-            aesthetics.push('neon-blue');
-            keywords.push('hologram');
-            keywords.push('neon');
-          } else if (saturation === 'muted') {
-            aesthetics.push('minimal-cool');
-            keywords.push('minimal');
-          } else {
-            aesthetics.push('cool-tone');
-            keywords.push('blue');
-          }
+          if (saturation === 'vibrant') { aesthetics.push('holographic','neon-blue'); keywords.push('hologram','neon'); }
+          else if (saturation === 'muted') { aesthetics.push('minimal-cool'); keywords.push('minimal'); }
+          else { aesthetics.push('cool-tone'); keywords.push('blue'); }
         }
-        // Purple / violet range (buckets 9-11)
         if (dominantBucket >= 9 && dominantBucket <= 11) {
           colors.push('purple');
           aesthetics.push('mystical');
-          if (saturation === 'vibrant') {
-            keywords.push('neon');
-            aesthetics.push('holographic');
-          } else {
-            keywords.push('depth');
-          }
+          if (saturation === 'vibrant') { keywords.push('neon'); aesthetics.push('holographic'); }
+          else keywords.push('depth');
         }
-        // Cyan / teal range (buckets 5-7)
         if (dominantBucket >= 5 && dominantBucket <= 7) {
-          colors.push('teal');
-          aesthetics.push('futuristic');
-          keywords.push('connection');
+          colors.push('teal'); aesthetics.push('futuristic'); keywords.push('connection');
         }
-        // Dark overall
         if (brightness === 'dark') {
-          aesthetics.push('dark');
-          keywords.push('depth');
-          if (saturatedRatio > 0.2) {
-            aesthetics.push('dramatic');
-            keywords.push('contrast');
-          }
+          aesthetics.push('dark'); keywords.push('depth');
+          if (saturatedRatio > 0.2) { aesthetics.push('dramatic'); keywords.push('contrast'); }
         }
-        // Light overall
-        if (brightness === 'light') {
-          aesthetics.push('bright');
-          keywords.push('clarity');
-        }
-        // Vibrant overall
-        if (saturation === 'vibrant') {
-          aesthetics.push('high-contrast');
-          keywords.push('energy');
-        }
-        // Muted overall
-        if (saturation === 'muted') {
-          aesthetics.push('subdued');
-          keywords.push('quiet');
-        }
-
-        // Neutral fallback color
+        if (brightness === 'light') { aesthetics.push('bright'); keywords.push('clarity'); }
+        if (saturation === 'vibrant') { aesthetics.push('high-contrast'); keywords.push('energy'); }
+        if (saturation === 'muted') { aesthetics.push('subdued'); keywords.push('quiet'); }
         if (colors.length === 0) colors.push(dominantHueName);
 
-        // Detect possible visual patterns from pixel variance
         let variance = 0;
         const avgR = totalH / pixelCount;
-        for (let i = 0; i < data.length; i += 4) {
-          const diff = data[i] - avgR;
-          variance += diff * diff;
-        }
+        for (let i = 0; i < data.length; i += 4) { const d2 = data[i] - avgR; variance += d2 * d2; }
         variance = Math.sqrt(variance / pixelCount);
         const composition = variance > 60 ? 'complex/layered' : variance > 30 ? 'structured' : 'minimal';
-        if (variance > 55) {
-          keywords.push('complex');
-          keywords.push('layered');
-          aesthetics.push('network-like');
-        } else if (variance < 25) {
-          keywords.push('minimal');
-          aesthetics.push('clean');
-        }
+        if (variance > 55) { keywords.push('complex','layered'); aesthetics.push('network-like'); }
+        else if (variance < 25) { keywords.push('minimal'); aesthetics.push('clean'); }
 
-        // Build caption from detected characteristics
-        const moodMap: Record<string, string> = {
-          'dark-vibrant': '어둡고 강렬한',
-          'dark-muted': '어둡고 차분한',
-          'dark-balanced': '차갑고 깊은',
-          'medium-vibrant': '선명하고 생동감 있는',
-          'medium-muted': '차분하고 절제된',
-          'medium-balanced': '균형 잡힌',
-          'light-vibrant': '밝고 강렬한',
-          'light-muted': '밝고 미니멀한',
-          'light-balanced': '맑고 정돈된',
+        const moodMap: Record<string,string> = {
+          'dark-vibrant':'어둡고 강렬한','dark-muted':'어둡고 차분한','dark-balanced':'차갑고 깊은',
+          'medium-vibrant':'선명하고 생동감 있는','medium-muted':'차분하고 절제된','medium-balanced':'균형 잡힌',
+          'light-vibrant':'밝고 강렬한','light-muted':'밝고 미니멀한','light-balanced':'맑고 정돈된',
         };
         const mood = moodMap[`${brightness}-${saturation}`] ?? '인상적인';
-
         const colorLabel = colors[0] ?? dominantHueName;
         const aestheticLabel = aesthetics[0] ?? '독특한';
-        const caption = `${mood} ${colorLabel} 톤의 이미지. ${aestheticLabel} 느낌의 시각적 구성.`;
-        const inferredUserInterest = `${aestheticLabel} 계열의 시각 언어에 반복적으로 끌리는 경향`;
 
         resolve({
-          caption,
+          caption: `${mood} ${colorLabel} 톤의 이미지. ${aestheticLabel} 느낌의 시각적 구성.`,
           visibleText: '',
           objects: [],
           aesthetics: [...new Set(aesthetics)],
@@ -201,19 +275,16 @@ async function analyzeImageBlob(blob: Blob): Promise<ImageUnderstanding> {
           colors: [...new Set(colors)],
           composition,
           keywords: [...new Set(keywords)],
-          inferredUserInterest,
+          inferredUserInterest: `${aestheticLabel} 계열의 시각 언어에 반복적으로 끌리는 경향`,
         });
-      } catch {
-        URL.revokeObjectURL(url);
-        resolve(fallbackUnderstanding());
-      }
+      } catch { URL.revokeObjectURL(url); resolve(localFallback()); }
     };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(fallbackUnderstanding()); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(localFallback()); };
     img.src = url;
   });
 }
 
-function fallbackUnderstanding(): ImageUnderstanding {
+function localFallback(): ImageUnderstanding {
   return {
     caption: '시각적 참고 이미지',
     visibleText: '',
@@ -227,43 +298,58 @@ function fallbackUnderstanding(): ImageUnderstanding {
   };
 }
 
+function localImageToSignals(u: ImageUnderstanding, itemId: string, now: string): MultimodalSignal[] {
+  const signals: MultimodalSignal[] = [];
+  const seen = new Set<string>();
+  const add = (kind: MultimodalSignal['kind'], value: string, confidence: number) => {
+    const v = value.trim();
+    if (!v || seen.has(`${kind}:${v}`)) return;
+    seen.add(`${kind}:${v}`);
+    signals.push({ id: uuidv4(), itemId, kind, value: v, confidence, createdAt: now });
+  };
+  add('visual_caption', u.caption, 0.75);
+  for (const a of u.aesthetics) add('aesthetic', a, 0.70);
+  for (const kw of u.keywords) add('keyword', kw, 0.65);
+  for (const c of u.colors) { if (c !== 'unknown') add('aesthetic', c, 0.58); }
+  add('intent', u.inferredUserInterest, 0.62);
+  if (u.composition && u.composition !== 'unknown') add('metadata', `composition:${u.composition}`, 0.55);
+  return signals;
+}
+
 // ---------------------------------------------------------------------------
-// Text keyword extraction — rich vocabulary
+// Text keyword extraction — heuristic fallback for text
 // ---------------------------------------------------------------------------
 
-const KEYWORD_GROUPS: Record<string, { keywords: string[]; nodeHint: string }> = {
-  hologram:    { keywords: ['hologram', 'holographic', '홀로그램', 'transparent', 'translucent', 'neon', '네온', 'glow', 'glowing'], nodeHint: 'aesthetic' },
-  constellation: { keywords: ['constellation', '별자리', 'star', 'stars', 'cosmos', '우주', 'space', 'galaxy', '은하'], nodeHint: 'aesthetic' },
-  network:     { keywords: ['network', 'graph', 'connection', 'connected', 'link', '연결', 'node', 'edge', 'web', '그래프'], nodeHint: 'interest' },
-  brain:       { keywords: ['brain', '뇌', 'neuron', '뉴런', 'neural', 'cognitive', 'mind', '마음', 'intelligence', '지능'], nodeHint: 'interest' },
-  agent:       { keywords: ['agent', '에이전트', 'ai', 'artificial intelligence', 'personal ai', '개인 ai', 'assistant'], nodeHint: 'project' },
-  privacy:     { keywords: ['privacy', '프라이버시', '개인정보', 'private', 'secure', '보안', 'trust', '신뢰', 'consent'], nodeHint: 'project' },
-  local:       { keywords: ['local', '로컬', 'local-first', 'offline', '오프라인', 'on-device', 'self-hosted'], nodeHint: 'project' },
-  memory:      { keywords: ['memory', '기억', 'remember', 'recall', 'store', '저장', 'retention', 'archive', 'vault'], nodeHint: 'interest' },
-  minimal:     { keywords: ['minimal', '미니멀', 'clean', '깔끔한', 'simple', 'quiet', '조용한', 'calm', '고요한'], nodeHint: 'aesthetic' },
-  worldview:   { keywords: ['worldview', '세계관', 'perspective', 'philosophy', '철학', 'ideology', 'vision', '비전'], nodeHint: 'idea' },
-  design:      { keywords: ['design', '디자인', 'ui', 'ux', 'interface', 'layout', 'visual', '시각', 'aesthetic', '미적'], nodeHint: 'aesthetic' },
-  knowledge:   { keywords: ['knowledge', '지식', 'insight', '인사이트', 'learning', '학습', 'concept', 'idea', '아이디어'], nodeHint: 'idea' },
-  data:        { keywords: ['data', '데이터', 'information', '정보', 'corpus', 'dataset', 'collection'], nodeHint: 'evidence' },
-  depth:       { keywords: ['depth', 'layer', 'layered', 'dimension', '차원', 'complex', '복잡', 'structure', '구조'], nodeHint: 'aesthetic' },
+const KEYWORD_GROUPS: Record<string, { keywords: string[] }> = {
+  hologram:    { keywords: ['hologram','holographic','홀로그램','transparent','neon','네온','glow'] },
+  constellation: { keywords: ['constellation','별자리','star','cosmos','우주','space','galaxy','은하'] },
+  network:     { keywords: ['network','graph','connection','connected','link','연결','node','edge','web'] },
+  brain:       { keywords: ['brain','뇌','neuron','뉴런','neural','cognitive','mind','마음','intelligence'] },
+  agent:       { keywords: ['agent','에이전트','ai','artificial intelligence','personal ai','assistant'] },
+  privacy:     { keywords: ['privacy','프라이버시','개인정보','private','secure','보안','trust','신뢰'] },
+  local:       { keywords: ['local','로컬','local-first','offline','오프라인','on-device','self-hosted'] },
+  memory:      { keywords: ['memory','기억','remember','recall','store','저장','retention','archive','vault'] },
+  minimal:     { keywords: ['minimal','미니멀','clean','깔끔한','simple','quiet','조용한','calm'] },
+  worldview:   { keywords: ['worldview','세계관','perspective','philosophy','철학','vision','비전'] },
+  design:      { keywords: ['design','디자인','ui','ux','interface','layout','visual','시각'] },
+  knowledge:   { keywords: ['knowledge','지식','insight','인사이트','learning','학습','concept','idea'] },
+  data:        { keywords: ['data','데이터','information','정보','corpus','dataset','collection'] },
+  depth:       { keywords: ['depth','layer','layered','dimension','차원','complex','복잡','structure'] },
 };
 
-function extractTextKeywords(text: string): Array<{ keyword: string; group: string; confidence: number }> {
+function extractTextKeywords(text: string): Array<{ keyword: string; confidence: number }> {
   const lower = text.toLowerCase();
-  const found: Array<{ keyword: string; group: string; confidence: number }> = [];
+  const found: Array<{ keyword: string; confidence: number }> = [];
   for (const [group, { keywords }] of Object.entries(KEYWORD_GROUPS)) {
     for (const kw of keywords) {
-      if (lower.includes(kw)) {
-        found.push({ keyword: group, group, confidence: 0.75 });
-        break;
-      }
+      if (lower.includes(kw)) { found.push({ keyword: group, confidence: 0.72 }); break; }
     }
   }
   return found;
 }
 
 // ---------------------------------------------------------------------------
-// Main extractor — now async to support image analysis
+// Main extractor — API primary, canvas/heuristic fallback
 // ---------------------------------------------------------------------------
 
 export async function extractSignals(item: RawItem, blob?: Blob): Promise<MultimodalSignal[]> {
@@ -271,9 +357,9 @@ export async function extractSignals(item: RawItem, blob?: Blob): Promise<Multim
   const now = new Date().toISOString();
 
   const addSignal = (kind: MultimodalSignal['kind'], value: string, confidence: number) => {
-    if (value.trim() && !signals.some(s => s.kind === kind && s.value === value)) {
-      signals.push({ id: uuidv4(), itemId: item.id, kind, value: value.trim(), confidence, createdAt: now });
-    }
+    const v = (value ?? '').trim();
+    if (!v || signals.some(s => s.kind === kind && s.value === v)) return;
+    signals.push({ id: uuidv4(), itemId: item.id, kind, value: v, confidence, createdAt: now });
   };
 
   // Demo seed: use predefined signals
@@ -281,81 +367,76 @@ export async function extractSignals(item: RawItem, blob?: Blob): Promise<Multim
     return DEMO_SEED_SIGNALS[item.id];
   }
 
-  // ── Image processing ─────────────────────────────────────────────────
+  // ── Image/PDF: API primary → canvas fallback ──────────────────────────────
   if ((item.assetType === 'image' || item.assetType === 'pdf') && blob) {
-    const understanding = await analyzeImageBlob(blob);
+    let apiUsed = false;
 
-    // Caption as a visual_caption signal
-    addSignal('visual_caption', understanding.caption, 0.85);
-
-    // Each aesthetic becomes a signal
-    for (const aes of understanding.aesthetics) {
-      addSignal('aesthetic', aes, 0.8);
-    }
-    // Each keyword
-    for (const kw of understanding.keywords) {
-      addSignal('keyword', kw, 0.72);
-    }
-    // Colors as aesthetic signals
-    for (const col of understanding.colors) {
-      if (col !== 'unknown') addSignal('aesthetic', col, 0.65);
-    }
-    // Mood as intent
-    addSignal('intent', understanding.inferredUserInterest, 0.7);
-    // Composition
-    if (understanding.composition && understanding.composition !== 'unknown') {
-      addSignal('metadata', `composition:${understanding.composition}`, 0.6);
+    // Try API-assisted vision understanding
+    const visionResult = await callVisionApi(blob, item.mimeType);
+    if (visionResult) {
+      const apiSignals = visionResultToSignals(visionResult, item.id, now, signals);
+      signals.push(...apiSignals);
+      apiUsed = true;
     }
 
-    // Also check filename for any extra hints
+    // Fallback to canvas analysis if API failed
+    if (!apiUsed) {
+      const local = await analyzeImageBlobLocally(blob);
+      const localSignals = localImageToSignals(local, item.id, now);
+      signals.push(...localSignals);
+    }
+
+    // Filename hints (low confidence, additive)
     if (item.fileName) {
       const lower = item.fileName.toLowerCase().replace(/[_\-\.]/g, ' ');
-      const hits = extractTextKeywords(lower);
-      for (const h of hits) {
-        addSignal('keyword', h.keyword, h.confidence * 0.6);
+      for (const h of extractTextKeywords(lower)) {
+        addSignal('keyword', h.keyword, h.confidence * 0.5);
       }
     }
   }
 
-  // ── Text processing ───────────────────────────────────────────────────
+  // ── Text: API primary → heuristic fallback ────────────────────────────────
   if (item.textContent) {
     addSignal('file_text', item.textContent.slice(0, 300), 0.9);
-    const hits = extractTextKeywords(item.textContent);
-    for (const h of hits) {
-      addSignal('keyword', h.keyword, h.confidence);
+
+    // Try API-assisted text understanding
+    const textResult = await callTextApi(item.textContent);
+    if (textResult) {
+      const apiSignals = textResultToSignals(textResult, item.id, now, signals);
+      signals.push(...apiSignals);
+    } else {
+      // Heuristic fallback
+      for (const h of extractTextKeywords(item.textContent)) {
+        addSignal('keyword', h.keyword, h.confidence);
+      }
+      const text = item.textContent.toLowerCase();
+      if (text.includes('투명') || text.includes('반투명')) addSignal('aesthetic', 'translucent', 0.8);
+      if (text.includes('로컬') || text.includes('local')) addSignal('intent', 'local-first', 0.85);
+      if (text.includes('프라이버시') || text.includes('privacy')) addSignal('intent', 'privacy', 0.85);
     }
-    // Detect explicit aesthetic language in text
-    const text = item.textContent.toLowerCase();
-    if (text.includes('투명') || text.includes('반투명')) addSignal('aesthetic', 'translucent', 0.8);
-    if (text.includes('로컬') || text.includes('local')) addSignal('intent', 'local-first', 0.85);
-    if (text.includes('프라이버시') || text.includes('privacy')) addSignal('intent', 'privacy', 0.85);
   }
 
-  // ── File-only (no blob yet available) ────────────────────────────────
-  if ((item.assetType === 'image') && !blob && item.fileName) {
+  // ── File-only (image without blob yet) ────────────────────────────────────
+  if (item.assetType === 'image' && !blob && item.fileName) {
     const lower = item.fileName.toLowerCase().replace(/[_\-\.]/g, ' ');
     addSignal('metadata', `filename:${item.fileName}`, 0.9);
-    const hits = extractTextKeywords(lower);
-    for (const h of hits) {
+    for (const h of extractTextKeywords(lower)) {
       addSignal('keyword', h.keyword, h.confidence * 0.7);
     }
-    // Always produce at least a generic visual signal
     if (signals.length <= 1) {
       addSignal('aesthetic', 'visual-reference', 0.5);
       addSignal('keyword', 'image', 0.4);
     }
   }
 
-  // ── User note always takes priority ──────────────────────────────────
+  // ── User note always highest priority ─────────────────────────────────────
   if (item.userNote) {
     addSignal('intent', item.userNote, 0.95);
-    const noteHits = extractTextKeywords(item.userNote);
-    for (const h of noteHits) {
+    for (const h of extractTextKeywords(item.userNote)) {
       addSignal('keyword', h.keyword, h.confidence + 0.1);
     }
   }
 
-  // Final fallback
   if (signals.length === 0) {
     addSignal('metadata', 'generic-item', 0.2);
   }
