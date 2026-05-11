@@ -1,0 +1,49 @@
+현재 문제는 API code가 작성된 것과 별개로, Replit 라이브 앱에서 /api/understand/* endpoint가 404라는 점이다.
+먼저 API 서버가 실제 배포/개발 workflow에 연결되도록 고쳐라.
+
+필수 수정 A — API 연결/배포:
+1. Replit workflow에서 artifacts/api-server도 함께 실행하거나,
+   snapmind Vite dev server가 /api 요청을 api-server로 proxy하도록 구성해라.
+2. 라이브 URL에서 다음이 404가 아니어야 한다:
+   - /api/healthz
+   - /api/understand/vision
+   - /api/understand/text
+   - /api/understand/chat
+3. API 실패 여부를 조용히 숨기지 말고, 개발 모드에서는 Vision API 사용/API fallback 여부를 확인할 수 있게 로그나 debug 상태를 남겨라.
+
+필수 수정 B — Brain Map UX 복구:
+4. Brain Map에 node label을 다시 표시해라.
+5. BrainMapInspector를 WorldviewBrainMap overlay 위에 실제로 보이게 하거나 overlay 내부로 옮겨라.
+6. Feedback mode 버튼과 “이 연결 약하게 하기 / 이 연결 끊기”가 실제 선택 후 보이게 해라.
+7. FeedPreview가 최근 3개만 보여주는 것은 한도처럼 보이므로 “최근 3개” 표시이거나 전체 보기/스크롤로 바꿔라.
+
+필수 수정 C — API-derived graph 품질:
+8. API가 한국어 키워드/장면/물체를 반환해도 graph 연결이 되도록 semantic relation 로직을 확장해라.
+   현재 SEMANTIC_PAIRS가 영어/hologram/agent 중심이라 일반 이미지와 한국어 키워드에서 연결성이 약하다.
+   다음을 반영해라:
+   - 한국어/영어 동의어 normalize: 예) 카페/cafe/coffee shop, 여행/travel, 바다/ocean/sea, 도시/city, 패션/fashion, 음식/food, 인테리어/interior, UI/interface
+   - 같은 RawItem에서 나온 scene/object/style/mood/keyword는 co-occurrence edge로 연결
+   - API-derived signals는 `sourceItemId`가 같으면 최소 1~3개 핵심 edge를 생성
+   - caption 전체 문장을 node label로 만들지 말고 짧은 keyword/object/scene 중심으로 node를 만들어라
+
+9. AgentProfile formation 조건을 완화해라.
+   현재 `sourceCount >= 2` 카드가 있어야 emerging으로 올라가는데, API가 매번 다른 표현을 만들면 계속 seed에 머무를 수 있다.
+   다음 기준을 추가해라:
+   - itemCount >= 2 && nodes.length >= 4 && edges.length >= 2 이면 emerging 가능
+   - highStrengthCards가 충분하면 sourceCount 반복이 없어도 emerging 가능
+   - API-derived image signals가 여러 개 있으면 seed 답변에 갇히지 않게 해라
+
+10. Chat 응답 fallback 품질을 넓혀라.
+   localHeuristicAdapter/Chat context가 hologram/agent/network 중심 사전에만 의존하지 않게 해라.
+   API-derived cards의 description, visual_caption, objects, scene, inferredUserInterest를 우선 사용해 답변하게 해라.
+   사전에 없는 키워드도 "'x'에 대한 관심이 반복" 같은 generic 문장으로 끝내지 말고,
+   해당 카드 description과 관련 edge를 기반으로 자연어로 요약해라.
+
+검증:
+- 라이브 URL에서 /api/understand/*가 404가 아니어야 한다.
+- 이미지 업로드 후 개발 로그에서 “Vision API used”인지 “fallback used”인지 확인 가능해야 한다.
+- Brain Map에서 키워드 라벨이 보여야 한다.
+- 노드/엣지 선택 시 Inspector가 보여야 한다.
+- Feedback mode에서 연결 약화/끊기가 가능해야 한다.
+- 일반 이미지 2~3장을 넣으면 hologram/agent가 아니어도 scene/object/style 기반 노드와 연결이 생겨야 한다.
+- “내가 좋아하는 게 뭐일 것 같아?”에 seed/generic 답변이 아니라 저장 이미지 기반 취향을 구체적으로 말해야 한다.

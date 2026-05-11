@@ -11,9 +11,16 @@ export function recomputeAgentProfile(
   
   const highStrengthCards = cards.filter(c => c.strength > 0.6);
   
+  const hasRepeatSignal = cards.some(c => c.sourceCount >= 2);
+  const hasEnoughGraph = nodes.length >= 4 && edges.length >= 2;
+  const hasEnoughHighStrength = highStrengthCards.length >= 3;
+
   if (items.length === 0) {
     stage = "empty";
-  } else if (items.length >= 2 && cards.some(c => c.sourceCount >= 2)) {
+  } else if (
+    items.length >= 2 &&
+    (hasRepeatSignal || hasEnoughGraph || hasEnoughHighStrength)
+  ) {
     stage = highStrengthCards.length >= 5 ? "personal_worldview" : "emerging";
   } else if (items.length >= 1) {
     stage = "seed";

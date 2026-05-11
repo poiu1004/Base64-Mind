@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import {} from "react";
 import { Switch, Route, Router as WouterRouter } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -10,7 +10,6 @@ import { ChatPanel } from "./components/ChatPanel";
 import { SnapBar } from "./components/SnapBar";
 import { FeedPreview } from "./components/FeedPreview";
 import { WorldviewBrainMap } from "./components/WorldviewBrainMap";
-import { BrainMapInspector } from "./components/BrainMapInspector";
 import { loadDemoSeed } from "./demo/demoScenario";
 import { useSnapMindStore } from "./state/useSnapMindStore";
 
@@ -35,7 +34,6 @@ function Home() {
       </div>
 
       <WorldviewBrainMap />
-      <BrainMapInspector />
       
       {agentProfile?.formationStage === "empty" && (
         <button 
